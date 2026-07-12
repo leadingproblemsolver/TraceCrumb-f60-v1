@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase, AI_FUNCTION_NAME, isSupabaseConfigured } from './lib/supabaseClient.js';
 import { BRANCH } from './branchConfig.js';
 import { buildMarkdownRecord, completenessGate, fingerprint, rankPriorDecisions, toLines } from './lib/decisionUtils.js';
@@ -6,7 +6,16 @@ import { buildMarkdownRecord, completenessGate, fingerprint, rankPriorDecisions,
 const DRAFT_KEY = 'tracecrumb-active-incident-draft';
 const TOKEN_KEY = 'tracecrumb-validation-token-v1';
 const FIRST_RUN_SIGNAL_KEY = 'tracecrumb-first-run-signal-v1';
+const MASCOT_DEMO_SEEN_KEY = 'tracecrumb-mascot-demo-seen-v1';
 const MAX_RUNS = 10;
+
+const DEMO_MASCOT_STEPS = [
+  { title: "Hi — I'm Crumbs", body: "This page is a fixed worked example. Nothing here is live, saved, or counted against a run." },
+  { title: '1. Your theory, locked first', body: "The team's original theory is saved before any challenge, so it can't be rewritten after the fact." },
+  { title: '2. Four decision-changing cards', body: 'Strongest contradiction, a credible alternative cause, the cheapest falsification check, and the decision boundary.' },
+  { title: '3. Next move, then outcome', body: 'Nothing is preselected. The responder chooses the next move, then later records what actually happened.' },
+  { title: 'Your turn', body: 'Run your own real check with one email. It takes a couple of minutes and only costs a run once a checkpoint is saved.' },
+];
 
 const EMPTY_FORM = {
   title: '', service_name: '', severity: 'high', symptom_text: '', impact: '', consequence_type: 'customer', decision_deadline: '',
@@ -56,6 +65,32 @@ function localDateTimeToIso(value) {
   if (!value) return null;
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function formatDuration(totalSeconds) {
+  const seconds = Math.max(0, Math.round(totalSeconds || 0));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = seconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${secs}s`;
+  return `${secs}s`;
+}
+
+function formatRelativeTime(iso) {
+  if (!iso) return 'recently';
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const mins = Math.round(diffMs / 60000);
+  if (mins < 1) return 'moments ago';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+function truncate(value, max) {
+  const text = String(value || '');
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
 function getSourceChannel() {
@@ -121,7 +156,7 @@ function SignupPanel({ onRegistered, onBack }) {
   return <div className="auth-wrap"><div className="auth-top row"><button className="secondary" onClick={onBack}>← Landing</button><ThemeToggle /></div><div className="auth card"><div className="kicker">10-run validation access</div><h2>Start without an account system</h2><p>Enter an email so we can attribute validation evidence. No password, identity provider, or Supabase Auth record is created.</p><form className="form-grid" onSubmit={submit}><label>Email<input required type="email" autoComplete="email" maxLength="254" value={email} onChange={(e) => setEmail(e.target.value)} /></label><div className="boundary"><strong>Access boundary</strong><p>This browser stores a random access token. Export important records before clearing browser storage.</p></div>{error ? <p className="loss" role="alert">{error}</p> : null}<button className="glow-cta" disabled={busy}>{busy ? 'Opening validation workspace…' : `Start your ${MAX_RUNS}-run validation`}</button></form></div></div>;
 }
 
-function WorkedExample() { useEffect(() => { logEvent('demo_view'); }, []); return <main className="container demo-page"><div className="header"><div className="brand"><span className="kicker">Worked example — not a live investigation</span><h1>{BRANCH.productDescriptor}</h1><p>Example data only. No production system, telemetry, database write, or AI provider is queried.</p></div><div className="row"><a className="button-link secondary" href="/">Back</a><a className="button-link" href="/?start=1&source_channel=demo">Run your own check</a></div></div><ProcessStrip active={3} /><OutcomeDelta record={WORKED_EXAMPLE} /><DecisionRecord record={WORKED_EXAMPLE} /></main>; }
+function WorkedExample() { useEffect(() => { logEvent('demo_view'); }, []); return <main className="container demo-page"><div className="header"><div className="brand"><span className="kicker">Worked example — not a live investigation</span><h1>{BRANCH.productDescriptor}</h1><p>Example data only. No production system, telemetry, database write, or AI provider is queried.</p></div><div className="row"><a className="button-link secondary" href="/">Back</a><a className="button-link" href="/?start=1&source_channel=demo">Run your own check</a></div></div><ProcessStrip active={3} /><OutcomeDelta record={WORKED_EXAMPLE} /><DecisionRecord record={WORKED_EXAMPLE} /><DemoMascot /></main>; }
 
 function OutcomeDelta({ record }) { if (!record?.postReviewAction) return null; return <section className="outcome-delta card"><div><span className="kicker">Before review</span><strong>{record.decision.selected_branch}</strong></div><b>→</b><div><span className="kicker">After review</span><strong>{record.postReviewAction.final_branch}</strong></div><b>→</b><div><span className="kicker">Outcome</span><strong>{record.outcome ? `${record.outcome.outcome} in ${record.outcome.minutes_to_falsification ?? '—'} min` : 'Pending'}</strong></div></section>; }
 
@@ -134,7 +169,7 @@ function ReviewPanel({ record }) {
   return <section className="review-panel"><ProviderStatus record={record} /><div className="review-verdict"><span className="kicker">Decision checkpoint</span><strong className={fallback ? 'warn' : review.verdict === 'proceed' ? 'ok' : 'warn'}>{verdict.toUpperCase()}</strong></div><div className="review-grid"><div><h3>1. Strongest contradiction</h3><BulletList items={review.missing_or_weak_evidence} empty="No material contradiction identified." /></div><div><h3>2. Credible alternative cause</h3><p>{fallback ? 'Not generated by the deterministic fallback.' : review.counter_hypothesis || 'Not established.'}</p></div><div><h3>3. Cheapest falsification check</h3><p>{review.cheapest_falsification_check || record.decision.first_action || 'Not established.'}</p></div><div><h3>4. Decision boundary</h3><BulletList items={review.branch_abort_conditions || record.decision.abort_conditions} empty={review.premature_closure_risk || 'No boundary recorded.'} />{review.premature_closure_risk ? <p><strong>Closure risk:</strong> {review.premature_closure_risk}</p> : null}</div></div><details className="optional-fields"><summary>Supporting evidence and rationale</summary><div className="optional-fields-body"><h3>What supports the theory</h3><BulletList items={review.strongest_supporting_evidence} /><p><strong>Why:</strong> {review.rationale || 'No rationale returned.'}</p></div></details><p className="scope-warning">Scope: redacted submitted record only. No live telemetry, root-cause proof, or remediation execution.</p></section>;
 }
 
-function Provenance({ record }) { const row = record.reviewRow || {}; return <div className="provenance"><span className="pill">Saved before review</span><span className="pill">Source: {record.decision.source_type}{record.decision.source_name ? ` / ${record.decision.source_name}` : ''}</span><span className="pill">Review: {row.fallback ? 'fallback' : row.provider || 'worked example'}</span>{record.decision.commit_hash ? <span className="pill hash">Hash: {record.decision.commit_hash.slice(0, 12)}…</span> : null}</div>; }
+function Provenance({ record }) { const row = record.reviewRow || {}; return <div className="provenance"><span className="pill">Saved before review</span><span className="pill">Source: {record.decision.source_type}{record.decision.source_name ? ` / ${record.decision.source_name}` : ''}</span><span className="pill">Review: {row.fallback ? 'fallback' : row.provider || 'worked example'}</span>{record.incident?.time_to_commit_seconds != null ? <span className="pill">Committed in {formatDuration(record.incident.time_to_commit_seconds)}</span> : null}{record.decision.commit_hash ? <span className="pill hash">Hash: {record.decision.commit_hash.slice(0, 12)}…</span> : null}</div>; }
 
 function DecisionRecord({ record, onPostReviewAction, onOutcome, saving }) {
   const [action, setAction] = useState(''); const [finalBranch, setFinalBranch] = useState(record.postReviewAction?.final_branch || ''); const [reason, setReason] = useState(''); const [owner, setOwner] = useState(''); const [dueAt, setDueAt] = useState('');
@@ -156,6 +191,36 @@ function ReviewFeedback({ record, onSave, saving }) {
 
 function ReadinessChecklist({ gate }) { return <div className={`gate-status ${gate.pass ? 'gate-pass' : 'gate-fail'}`}><strong>{gate.pass ? 'Ready to review' : 'Add the missing pieces'}</strong>{gate.failures.length ? <BulletList items={gate.failures} /> : <p>The record is specific enough to save and review.</p>}</div>; }
 
+function MascotWidget({ open, onToggle, attention, children }) {
+  return <div className="mascot-wrap">{open ? <div className="mascot-bubble card" role="dialog" aria-label="TraceCrumb guide">{children}</div> : null}<button type="button" className={`mascot-avatar${attention ? ' glow-cta' : ''}`} onClick={onToggle} aria-label="Open TraceCrumb guide">🐾</button></div>;
+}
+
+function DemoMascot() {
+  const [seen, setSeen] = useState(() => typeof window !== 'undefined' && Boolean(window.localStorage.getItem(MASCOT_DEMO_SEEN_KEY)));
+  const [open, setOpen] = useState(() => typeof window !== 'undefined' && !window.localStorage.getItem(MASCOT_DEMO_SEEN_KEY));
+  const [step, setStep] = useState(0);
+  function markSeen() { if (typeof window !== 'undefined') window.localStorage.setItem(MASCOT_DEMO_SEEN_KEY, '1'); setSeen(true); }
+  function close() { markSeen(); setOpen(false); }
+  function next() { if (step >= DEMO_MASCOT_STEPS.length - 1) return close(); setStep(step + 1); }
+  const current = DEMO_MASCOT_STEPS[step];
+  return <MascotWidget open={open} onToggle={() => setOpen((v) => !v)} attention={!seen}><span className="kicker">Crumbs — step {step + 1} of {DEMO_MASCOT_STEPS.length}</span><h3>{current.title}</h3><p>{current.body}</p><div className="mascot-bubble-actions"><button type="button" onClick={next}>{step >= DEMO_MASCOT_STEPS.length - 1 ? 'Got it' : 'Next'}</button><button type="button" className="secondary" onClick={close}>Skip</button></div></MascotWidget>;
+}
+
+function ConsoleMascotContent({ validationSession, history }) {
+  const remaining = Math.max(0, validationSession.max_runs - validationSession.run_count);
+  const activeText = validationSession.total_active_seconds ? ` · ${formatDuration(validationSession.total_active_seconds)} spent so far` : '';
+  const latest = history[0];
+  if (!latest) return <><h3>Welcome</h3><p>You have {remaining} of {validationSession.max_runs} runs. Load the worked input to see a filled example, or fill in your own real incident below.{activeText}</p></>;
+  const actionText = latest.postReviewAction ? `chose to ${latest.postReviewAction.action}: “${truncate(latest.postReviewAction.final_branch, 80)}”` : 'has not saved a next move yet';
+  const outcomeText = latest.outcome ? `Outcome: ${latest.outcome.outcome.replace('_', ' ')}.` : 'Outcome not recorded yet.';
+  return <><h3>Welcome back</h3><p>Last time ({formatRelativeTime(latest.decision.committed_at)}) you flagged “{truncate(latest.incident?.title, 60)}” and {actionText}. {outcomeText}</p><p>{remaining} of {validationSession.max_runs} runs left{activeText}.</p></>;
+}
+
+function ConsoleMascot({ validationSession, history }) {
+  const [open, setOpen] = useState(true);
+  return <MascotWidget open={open} onToggle={() => setOpen((v) => !v)} attention={false}><span className="kicker">Crumbs — welcome back</span><ConsoleMascotContent validationSession={validationSession} history={history} /><div className="mascot-bubble-actions"><button type="button" className="secondary" onClick={() => setOpen(false)}>Got it</button></div></MascotWidget>;
+}
+
 function FirstRunSignalModal({ decisionEventId, onDone }) {
   const [triggerContext, setTriggerContext] = useState(''); const [decisionDelta, setDecisionDelta] = useState(''); const [commercialThreshold, setCommercialThreshold] = useState('');
   const [busy, setBusy] = useState(false); const [error, setError] = useState('');
@@ -171,19 +236,34 @@ function FirstRunSignalModal({ decisionEventId, onDone }) {
 
 function DecisionGate({ validationSession, onSessionUpdate }) {
   const [form, setForm] = useState(() => { try { return { ...EMPTY_FORM, ...(JSON.parse(sessionStorage.getItem(DRAFT_KEY) || '{}')) }; } catch (_) { return EMPTY_FORM; } });
-  const [history, setHistory] = useState([]); const [record, setRecord] = useState(null); const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const gate = useMemo(() => completenessGate(form), [form]);
+  const [history, setHistory] = useState([]); const [historyReady, setHistoryReady] = useState(false); const [record, setRecord] = useState(null); const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const gate = useMemo(() => completenessGate(form), [form]);
   const [firstRunPrompt, setFirstRunPrompt] = useState(null);
+  const formStartRef = useRef(Date.now());
   useEffect(() => { sessionStorage.setItem(DRAFT_KEY, JSON.stringify(form)); }, [form]);
-  async function loadHistory() { const data = await callApi('history'); setHistory(data.records || []); }
+  async function loadHistory() { const data = await callApi('history'); setHistory(data.records || []); setHistoryReady(true); }
   useEffect(() => { loadHistory().catch((err) => setError(err.message)); }, [validationSession.id]);
+  useEffect(() => {
+    let accumulated = 0; let lastTick = Date.now();
+    function tick() { if (document.visibilityState === 'visible') accumulated += (Date.now() - lastTick) / 1000; lastTick = Date.now(); }
+    async function flush() {
+      tick(); const wholeSeconds = Math.floor(accumulated); if (wholeSeconds <= 0) return;
+      accumulated -= wholeSeconds;
+      try { const data = await callApi('record_active_time', { seconds: wholeSeconds }); onSessionUpdate(data.session); } catch (_) {}
+    }
+    const tickTimer = setInterval(tick, 5000); const flushTimer = setInterval(flush, 30000);
+    function onVisibilityChange() { tick(); if (document.visibilityState === 'hidden') flush(); }
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => { clearInterval(tickTimer); clearInterval(flushTimer); document.removeEventListener('visibilitychange', onVisibilityChange); flush(); };
+  }, []);
   async function submit(event) {
     event.preventDefault(); if (!gate.pass) return setError(gate.failures.join(' ')); setBusy(true); setError(''); setRecord(null);
     const priorRunCount = validationSession.run_count;
+    const timeToCommitSeconds = Math.max(0, Math.round((Date.now() - formStartRef.current) / 1000));
     try {
-      const normalized = { ...form, decision_deadline: localDateTimeToIso(form.decision_deadline), supporting_evidence: toLines(form.supporting_evidence), counterevidence: toLines(form.counterevidence), alternative_branches: toLines(form.alternative_branches), abort_conditions: toLines(form.abort_conditions), unknowns: toLines(form.unknowns), confidence: Number(form.confidence), fingerprint: fingerprint([form.title, form.service_name, form.symptom_text, form.supporting_evidence, form.selected_branch].join(' ')) };
+      const normalized = { ...form, decision_deadline: localDateTimeToIso(form.decision_deadline), supporting_evidence: toLines(form.supporting_evidence), counterevidence: toLines(form.counterevidence), alternative_branches: toLines(form.alternative_branches), abort_conditions: toLines(form.abort_conditions), unknowns: toLines(form.unknowns), confidence: Number(form.confidence), fingerprint: fingerprint([form.title, form.service_name, form.symptom_text, form.supporting_evidence, form.selected_branch].join(' ')), time_to_commit_seconds: timeToCommitSeconds };
       const priorIds = rankPriorDecisions(normalized, history.map((x) => ({ ...x.decision, id: x.decision.id, incidents: x.incident, decision_outcomes: x.outcome ? [x.outcome] : [] })), 5).map((item) => item.id);
       const data = await callApi('review', { form: normalized, prior_decision_ids: priorIds, source_channel: getSourceChannel() });
-      setRecord(data.record); onSessionUpdate(data.session); setForm(EMPTY_FORM); sessionStorage.removeItem(DRAFT_KEY); logEvent('first_value_reached', { provider: data.record.reviewRow.provider, verdict: data.record.review.verdict, fallback: data.record.reviewRow.fallback }); await loadHistory();
+      setRecord(data.record); onSessionUpdate(data.session); setForm(EMPTY_FORM); sessionStorage.removeItem(DRAFT_KEY); formStartRef.current = Date.now(); logEvent('first_value_reached', { provider: data.record.reviewRow.provider, verdict: data.record.review.verdict, fallback: data.record.reviewRow.fallback }); await loadHistory();
       if (priorRunCount === 0 && typeof window !== 'undefined' && !window.localStorage.getItem(FIRST_RUN_SIGNAL_KEY)) setFirstRunPrompt(data.record.decision.id);
     } catch (err) { setError(err.message || String(err)); } finally { setBusy(false); }
   }
@@ -191,10 +271,10 @@ function DecisionGate({ validationSession, onSessionUpdate }) {
   async function saveOutcome(payload) { setBusy(true); setError(''); try { const data = await callApi('save_outcome', { decision_event_id: record.decision.id, action_id: record.postReviewAction.id, ...payload }); setRecord({ ...record, outcome: data.outcome }); logEvent('outcome_recorded', { outcome: payload.outcome, tracecrumb_effect: payload.tracecrumb_effect }); await loadHistory(); } catch (err) { setError(err.message); } finally { setBusy(false); } }
   async function saveFeedback(payload) { setBusy(true); setError(''); try { const data = await callApi('save_feedback', { decision_event_id: record.decision.id, review_id: record.reviewRow.id, ...payload }); setRecord({ ...record, feedback: data.feedback }); logEvent('review_feedback', payload); await loadHistory(); } catch (err) { setError(err.message); } finally { setBusy(false); } }
   const remaining = Math.max(0, validationSession.max_runs - validationSession.run_count);
-  return <><section className="app-intro card"><div><span className="kicker">Validation run budget</span><h2>{remaining} of {validationSession.max_runs} runs remain</h2><p>Each submitted checkpoint consumes one server-enforced run, including a deterministic fallback. Drafting and worked examples do not consume runs.</p><ProcessStrip active={record ? (record.postReviewAction ? 2 : 1) : 0} /></div><div className="boundary"><strong>Human boundary</strong><p>Use a real decision with a real owner and consequence. Redact credentials, secrets, and customer PII. The tool challenges a theory; the responder remains accountable.</p></div></section><div className="grid gate-grid"><section className="card"><div className="form-heading"><div><span className="kicker">Step 1 — commit before review</span><h2>Stress-test a live decision before it becomes expensive to reverse.</h2></div><button className="secondary glow-cta" type="button" onClick={() => setForm(SAMPLE_FORM)}>Load worked input</button></div><form className="form-grid" onSubmit={submit}><label>What is happening?<textarea required maxLength="2400" value={form.symptom_text} onChange={(e) => setForm({ ...form, symptom_text: e.target.value })} /></label><label>Current theory<textarea required maxLength="1200" value={form.selected_branch} onChange={(e) => setForm({ ...form, selected_branch: e.target.value })} /></label><label>Directly observed evidence<textarea required maxLength="2400" value={form.supporting_evidence} onChange={(e) => setForm({ ...form, supporting_evidence: e.target.value })} /></label><label>Assumptions making it plausible<textarea required maxLength="1600" value={form.reasoning_summary} onChange={(e) => setForm({ ...form, reasoning_summary: e.target.value })} /></label><label>Action you are about to take<textarea required maxLength="1000" value={form.first_action} onChange={(e) => setForm({ ...form, first_action: e.target.value })} /></label><label>What would force a switch?<textarea required maxLength="1600" value={form.abort_conditions} onChange={(e) => setForm({ ...form, abort_conditions: e.target.value })} /></label><div className="two-col"><label>Consequence type<select value={form.consequence_type} onChange={(e) => setForm({ ...form, consequence_type: e.target.value })}><option value="deployment">Deployment</option><option value="customer">Customer</option><option value="rework">Rework</option><option value="revenue">Revenue</option><option value="security">Security</option><option value="delay">Delay</option><option value="other">Other</option></select></label><label>Decision deadline<input type="datetime-local" value={form.decision_deadline} onChange={(e) => setForm({ ...form, decision_deadline: e.target.value })} /></label></div><label>Consequence if wrong<textarea required maxLength="1200" value={form.impact} onChange={(e) => setForm({ ...form, impact: e.target.value })} /></label><details className="optional-fields"><summary>Add context</summary><div className="form-grid optional-fields-body"><div className="two-col"><label>Incident title<input maxLength="180" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} /></label><label>Service<input maxLength="100" value={form.service_name} onChange={(e) => setForm({ ...form, service_name: e.target.value })} /></label></div><label>Signals that do not fit<textarea maxLength="2400" value={form.counterevidence} onChange={(e) => setForm({ ...form, counterevidence: e.target.value })} /></label><label>Other plausible explanations<textarea maxLength="1600" value={form.alternative_branches} onChange={(e) => setForm({ ...form, alternative_branches: e.target.value })} /></label><label>Known unknowns<textarea maxLength="1600" value={form.unknowns} onChange={(e) => setForm({ ...form, unknowns: e.target.value })} /></label><label>Confidence: {form.confidence}%<input type="range" min="0" max="100" step="5" value={form.confidence} onChange={(e) => setForm({ ...form, confidence: Number(e.target.value) })} /></label></div></details><ReadinessChecklist gate={gate} />{error ? <p className="loss" role="alert">{error}</p> : null}<div className="row"><button disabled={busy || !gate.pass || remaining <= 0}>{remaining <= 0 ? '10-run limit reached' : busy ? 'Saving and reviewing…' : 'Commit theory → run checkpoint'}</button><button className="secondary glow-cta" type="button" disabled={busy} onClick={() => setForm(SAMPLE_FORM)}>Load worked input</button></div></form></section><section className="card current-record"><span className="kicker">Output contract</span><h2>Four decision-changing cards</h2><p>Strongest contradiction, credible alternative cause, cheapest falsification check, and decision boundary.</p><AuditPreview compact /></section></div>{record ? <DecisionRecord record={record} onPostReviewAction={saveAction} onOutcome={saveOutcome} saving={busy} /> : null}{record ? <ReviewFeedback record={record} onSave={saveFeedback} saving={busy} /> : null}<section className="card history"><span className="kicker">This browser’s validation evidence</span><h2>Prior checkpoints</h2>{history.length === 0 ? <p>No completed runs yet.</p> : <div className="list">{history.map((item) => <button className="item history-item" key={item.decision.id} onClick={() => setRecord(item)}><div className="row"><strong>{item.incident.title}</strong><span className="pill">{item.review ? 'Reviewed' : 'Pending'}</span><span className="pill">{item.postReviewAction ? item.postReviewAction.action : 'Action pending'}</span></div><p>{item.decision.selected_branch}</p><small>{new Date(item.decision.committed_at).toLocaleString()}</small></button>)}</div>}</section>{firstRunPrompt ? <FirstRunSignalModal decisionEventId={firstRunPrompt} onDone={() => setFirstRunPrompt(null)} /> : null}</>;
+  return <><section className="app-intro card"><div><span className="kicker">Validation run budget</span><h2>{remaining} of {validationSession.max_runs} runs remain</h2><p>Each submitted checkpoint consumes one server-enforced run, including a deterministic fallback. Drafting and worked examples do not consume runs.</p><ProcessStrip active={record ? (record.postReviewAction ? 2 : 1) : 0} /></div><div className="boundary"><strong>Human boundary</strong><p>Use a real decision with a real owner and consequence. Redact credentials, secrets, and customer PII. The tool challenges a theory; the responder remains accountable.</p></div></section><div className="grid gate-grid"><section className="card"><div className="form-heading"><div><span className="kicker">Step 1 — commit before review</span><h2>Stress-test a live decision before it becomes expensive to reverse.</h2></div><button className="secondary glow-cta" type="button" onClick={() => setForm(SAMPLE_FORM)}>Load worked input</button></div><form className="form-grid" onSubmit={submit}><label>What is happening?<textarea required maxLength="2400" value={form.symptom_text} onChange={(e) => setForm({ ...form, symptom_text: e.target.value })} /></label><label>Current theory<textarea required maxLength="1200" value={form.selected_branch} onChange={(e) => setForm({ ...form, selected_branch: e.target.value })} /></label><label>Directly observed evidence<textarea required maxLength="2400" value={form.supporting_evidence} onChange={(e) => setForm({ ...form, supporting_evidence: e.target.value })} /></label><label>Assumptions making it plausible<textarea required maxLength="1600" value={form.reasoning_summary} onChange={(e) => setForm({ ...form, reasoning_summary: e.target.value })} /></label><label>Action you are about to take<textarea required maxLength="1000" value={form.first_action} onChange={(e) => setForm({ ...form, first_action: e.target.value })} /></label><label>What would force a switch?<textarea required maxLength="1600" value={form.abort_conditions} onChange={(e) => setForm({ ...form, abort_conditions: e.target.value })} /></label><div className="two-col"><label>Consequence type<select value={form.consequence_type} onChange={(e) => setForm({ ...form, consequence_type: e.target.value })}><option value="deployment">Deployment</option><option value="customer">Customer</option><option value="rework">Rework</option><option value="revenue">Revenue</option><option value="security">Security</option><option value="delay">Delay</option><option value="other">Other</option></select></label><label>Decision deadline<input type="datetime-local" value={form.decision_deadline} onChange={(e) => setForm({ ...form, decision_deadline: e.target.value })} /></label></div><label>Consequence if wrong<textarea required maxLength="1200" value={form.impact} onChange={(e) => setForm({ ...form, impact: e.target.value })} /></label><details className="optional-fields"><summary>Add context</summary><div className="form-grid optional-fields-body"><div className="two-col"><label>Incident title<input maxLength="180" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} /></label><label>Service<input maxLength="100" value={form.service_name} onChange={(e) => setForm({ ...form, service_name: e.target.value })} /></label></div><label>Signals that do not fit<textarea maxLength="2400" value={form.counterevidence} onChange={(e) => setForm({ ...form, counterevidence: e.target.value })} /></label><label>Other plausible explanations<textarea maxLength="1600" value={form.alternative_branches} onChange={(e) => setForm({ ...form, alternative_branches: e.target.value })} /></label><label>Known unknowns<textarea maxLength="1600" value={form.unknowns} onChange={(e) => setForm({ ...form, unknowns: e.target.value })} /></label><label>Confidence: {form.confidence}%<input type="range" min="0" max="100" step="5" value={form.confidence} onChange={(e) => setForm({ ...form, confidence: Number(e.target.value) })} /></label></div></details><ReadinessChecklist gate={gate} />{error ? <p className="loss" role="alert">{error}</p> : null}<div className="row"><button disabled={busy || !gate.pass || remaining <= 0}>{remaining <= 0 ? '10-run limit reached' : busy ? 'Saving and reviewing…' : 'Commit theory → run checkpoint'}</button><button className="secondary glow-cta" type="button" disabled={busy} onClick={() => setForm(SAMPLE_FORM)}>Load worked input</button></div></form></section><section className="card current-record"><span className="kicker">Output contract</span><h2>Four decision-changing cards</h2><p>Strongest contradiction, credible alternative cause, cheapest falsification check, and decision boundary.</p><AuditPreview compact /></section></div>{record ? <DecisionRecord record={record} onPostReviewAction={saveAction} onOutcome={saveOutcome} saving={busy} /> : null}{record ? <ReviewFeedback record={record} onSave={saveFeedback} saving={busy} /> : null}<section className="card history"><span className="kicker">This browser’s validation evidence</span><h2>Prior checkpoints</h2>{history.length === 0 ? <p>No completed runs yet.</p> : <div className="list">{history.map((item) => <button className="item history-item" key={item.decision.id} onClick={() => setRecord(item)}><div className="row"><strong>{item.incident.title}</strong><span className="pill">{item.review ? 'Reviewed' : 'Pending'}</span><span className="pill">{item.postReviewAction ? item.postReviewAction.action : 'Action pending'}</span></div><p>{item.decision.selected_branch}</p><small>{new Date(item.decision.committed_at).toLocaleString()}</small></button>)}</div>}</section>{firstRunPrompt ? <FirstRunSignalModal decisionEventId={firstRunPrompt} onDone={() => setFirstRunPrompt(null)} /> : null}{historyReady ? <ConsoleMascot validationSession={validationSession} history={history} /> : null}</>;
 }
 
-function Header({ validationSession, onBack }) { const remaining = Math.max(0, validationSession.max_runs - validationSession.run_count); return <header className="header"><div className="brand"><span className="kicker">{BRANCH.kicker}</span><h1>{BRANCH.product}</h1><p>{BRANCH.promise}</p></div><div className="row"><ThemeToggle /><span className="pill">{validationSession.email}</span><span className="pill">{remaining}/{validationSession.max_runs} runs left</span><button className="secondary" onClick={onBack}>Landing</button></div></header>; }
+function Header({ validationSession, onBack }) { const remaining = Math.max(0, validationSession.max_runs - validationSession.run_count); return <header className="header"><div className="brand"><span className="kicker">{BRANCH.kicker}</span><h1>{BRANCH.product}</h1><p>{BRANCH.promise}</p></div><div className="row"><ThemeToggle /><span className="pill">{validationSession.email}</span><span className="pill">{remaining}/{validationSession.max_runs} runs left</span><span className="pill">{formatDuration(validationSession.total_active_seconds || 0)} active</span><button className="secondary" onClick={onBack}>Landing</button></div></header>; }
 
 export default function App() {
   const params = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : new URLSearchParams(); const isDemo = params.get('demo') === '1'; const wantsStart = params.get('start') === '1';

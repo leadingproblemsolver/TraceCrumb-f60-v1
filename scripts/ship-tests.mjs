@@ -99,6 +99,28 @@ assert.doesNotMatch(app, /How satisfied are you|Would you pay for this|What feat
 assert.match(edge, /save_signup_signal/);
 assert.match(edge, /validation_signup_signals/);
 
+// Mascot guide: scripted demo walkthrough plus a deterministic, existing-data-only console recap.
+assert.match(app, /function MascotWidget/);
+assert.match(app, /function DemoMascot/);
+assert.match(app, /function ConsoleMascot/);
+assert.match(app, /MASCOT_DEMO_SEEN_KEY/);
+assert.match(app, /Welcome back/);
+assert.doesNotMatch(app, /callApi\('generate_mascot|callApi\("generate_mascot|mascot.*openai/i);
+
+// Time-spent tracking: session active time and per-incident time-to-commit.
+assert.match(app, /record_active_time/);
+assert.match(app, /time_to_commit_seconds/);
+assert.match(app, /formatDuration/);
+assert.match(edge, /record_active_time/);
+assert.match(edge, /add_session_active_seconds/);
+assert.match(edge, /time_to_commit_seconds/);
+assert.match(schema, /total_active_seconds/);
+assert.match(schema, /time_to_commit_seconds/);
+assert.match(schema, /add column if not exists total_active_seconds/);
+assert.match(schema, /add column if not exists time_to_commit_seconds/);
+assert.match(schema, /create or replace function public\.add_session_active_seconds/);
+assert.match(schema, /grant execute on function public\.add_session_active_seconds\(uuid, integer\) to service_role/);
+
 // Active auth-free data model and atomic quota.
 for (const table of ['validation_sessions', 'validation_incidents', 'validation_decisions', 'validation_reviews', 'validation_actions', 'validation_outcomes', 'validation_feedback', 'validation_ai_requests', 'validation_events', 'validation_signup_signals']) {
   assert.match(schema, new RegExp(`create table if not exists public\\.${table}`));

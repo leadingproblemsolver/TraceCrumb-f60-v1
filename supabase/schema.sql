@@ -139,6 +139,13 @@ create table if not exists public.validation_signup_signals (
   created_at timestamptz not null default now()
 );
 
+-- Time-spent tracking. Added with ALTER ... ADD COLUMN IF NOT EXISTS (not a bare
+-- CREATE TABLE IF NOT EXISTS) so a pre-existing validation_sessions/validation_incidents
+-- table from an earlier migration is safely upgraded in place instead of silently
+-- keeping the column missing.
+alter table public.validation_sessions add column if not exists total_active_seconds integer not null default 0 check (total_active_seconds >= 0);
+alter table public.validation_incidents add column if not exists time_to_commit_seconds integer check (time_to_commit_seconds is null or time_to_commit_seconds >= 0);
+
 -- Compatibility guard: CREATE TABLE IF NOT EXISTS cannot upgrade a pre-existing,
 -- partially initialized validation_* table. Fail explicitly before any dependent
 -- index, function, or grant is created rather than silently operating on a
@@ -219,6 +226,18 @@ as $$
    where id = p_validation_session_id;
 $$;
 
+create or replace function public.add_session_active_seconds(p_validation_session_id uuid, p_seconds integer)
+returns void
+language sql
+security definer
+set search_path = public
+as $$
+  update public.validation_sessions
+     set total_active_seconds = total_active_seconds + greatest(0, least(p_seconds, 600)),
+         last_seen_at = now()
+   where id = p_validation_session_id;
+$$;
+
 -- The browser never receives direct table privileges. Only the Edge Function service role reads/writes.
 alter table public.validation_sessions enable row level security;
 alter table public.validation_incidents enable row level security;
@@ -243,5 +262,7 @@ revoke all on public.validation_events from public, anon, authenticated;
 revoke all on public.validation_signup_signals from public, anon, authenticated;
 revoke all on function public.reserve_validation_run(uuid) from public, anon, authenticated;
 revoke all on function public.release_validation_run(uuid) from public, anon, authenticated;
+revoke all on function public.add_session_active_seconds(uuid, integer) from public, anon, authenticated;
 grant execute on function public.reserve_validation_run(uuid) to service_role;
 grant execute on function public.release_validation_run(uuid) to service_role;
+grant execute on function public.add_session_active_seconds(uuid, integer) to service_role;

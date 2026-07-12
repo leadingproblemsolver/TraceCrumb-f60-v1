@@ -58,6 +58,18 @@ Immediately after a browser's **first** successfully persisted live checkpoint (
 - A browser-local marker (`tracecrumb-first-run-signal-v1`) and the table's one-row-per-session unique constraint together guarantee the popup and the row are created at most once per browser/workspace.
 - `first_run_signal_saved` and `first_run_signal_skipped` are recorded through the existing `log_event` action for operator visibility.
 
+## Mascot guide ("Crumbs")
+
+A small fixed avatar (bottom-right, on the worked example and the real console) opens a dismissible speech-bubble panel — no new image assets or animation library.
+
+- **Worked example (`/?demo=1`)**: a five-step scripted walkthrough of the theory → four-card checkpoint → next-move → outcome flow. It auto-opens once per browser (`tracecrumb-mascot-demo-seen-v1` in `localStorage`), can be skipped, and can be reopened any time by clicking the avatar.
+- **Real console**: on every return to the app, it auto-opens with a plain-language recap built entirely from already-durable data — the most recent `history` record (incident title, next move, outcome) plus the current run count and total active time — so a returning user immediately sees *why* they were there, *what* they decided, and *what happened*, without re-reading anything. There is no separate memory store and no extra LLM call behind this: it reuses the same `validation_decisions` / `validation_actions` / `validation_outcomes` rows already shown in "Prior checkpoints," which is the existing durable, per-user continuity record.
+
+## Time-spent tracking
+
+- **Per session**: the browser accumulates active foreground seconds (Page Visibility API) and flushes them roughly every 30 seconds through the `record_active_time` Edge Function action, which calls `add_session_active_seconds()` (clamped to 600s per call) to atomically increment `validation_sessions.total_active_seconds`. The running total is shown in the app header and in the mascot recap.
+- **Per incident**: the browser timestamps when the intake form starts being filled and sends the elapsed `time_to_commit_seconds` with the `review` action; it is stored on `validation_incidents` and shown as a "Committed in Xm Ys" pill on the saved record.
+
 ## What changed in this finalization
 
 ### Technical
@@ -180,7 +192,7 @@ npm run deploy:cloudflare
 ## 7. Non-negotiable production smoke test
 
 1. Open `/?source_channel=smoke_test` in a private browser.
-2. Open the worked example; confirm no run is consumed and the optional evidence modal does not appear.
+2. Open the worked example; confirm no run is consumed, the optional evidence modal does not appear, and the mascot avatar opens the five-step walkthrough once.
 3. Start a workspace with a real test email; confirm the signup CTA reads "Start your 10-run validation."
 4. Confirm the header shows `10/10 runs left`.
 5. Submit one redacted real incident decision.
@@ -190,10 +202,11 @@ npm run deploy:cloudflare
 9. Confirm the optional three-question evidence modal appears once; verify both the Skip path and the submit path work, and that it does not reappear after a page refresh.
 10. Attempt `revise` or `escalate` without an owner/due date and confirm it is rejected in the UI and by the API; then submit with owner and due date and confirm it succeeds.
 11. Save feedback and an outcome.
-12. Refresh and confirm history reopens the record on the same browser.
-13. Confirm direct browser table access is denied and the function is the only write boundary.
-14. Confirm a request with a wrong Origin and a request with no Origin header both receive 403.
-15. Confirm rows exist in all relevant `validation_*` tables, including exactly one `validation_signup_signals` row for the session.
+12. Refresh and confirm history reopens the record on the same browser, and the mascot recap on return shows the last incident, next move, and outcome.
+13. Confirm the header's active-time pill increases after leaving the tab open and returning.
+14. Confirm direct browser table access is denied and the function is the only write boundary.
+15. Confirm a request with a wrong Origin and a request with no Origin header both receive 403.
+16. Confirm rows exist in all relevant `validation_*` tables, including exactly one `validation_signup_signals` row for the session, and that `validation_incidents.time_to_commit_seconds` and `validation_sessions.total_active_seconds` are populated.
 
 ## 8. Distribution gate
 
