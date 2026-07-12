@@ -147,10 +147,10 @@ async function handleReview(admin: any, session: any, payload: any) {
   if ((daily.count || 0) >= globalLimit) { await admin.from("validation_ai_requests").insert({ validation_session_id: session.id, action: "review", status: "rate_limited", error_message: "Global daily review limit reached" }); throw new ApiError("Daily review capacity reached. Use the worked example or request a founder-run review.", 429); }
   const reserve = await admin.rpc("reserve_validation_run", { p_validation_session_id: session.id });
   if (reserve.error || !reserve.data?.length) throw new ApiError("The 10-run validation limit has been reached", 429);
-  let decisionId: string | null = null; let requestId: string | null = null;
+  let incidentId: string | null = null; let decisionId: string | null = null; let requestId: string | null = null; let checkpointCompleted = false;
   try {
     const incidentResult = await admin.from("validation_incidents").insert({ validation_session_id: session.id, title: form.title, service_name: form.service_name, severity: form.severity, symptom_text: form.symptom_text, impact: form.impact, consequence_type: form.consequence_type, decision_deadline: form.decision_deadline, fingerprint: form.fingerprint }).select("*").single();
-    if (incidentResult.error) throw incidentResult.error;
+    if (incidentResult.error) throw incidentResult.error; incidentId = incidentResult.data.id;
     const committedAt = new Date().toISOString(); const commitHash = await sha256(JSON.stringify({ validation_session_id: session.id, incident_id: incidentResult.data.id, committed_at: committedAt, theory: form.selected_branch, evidence: form.supporting_evidence, action: form.first_action, abort_conditions: form.abort_conditions }));
     const decisionResult = await admin.from("validation_decisions").insert({ validation_session_id: session.id, incident_id: incidentResult.data.id, source_channel: sourceChannel, source_type: form.source_type, source_name: form.source_name || null, selected_branch: form.selected_branch, supporting_evidence: form.supporting_evidence, counterevidence: form.counterevidence, reasoning_summary: form.reasoning_summary, alternative_branches: form.alternative_branches, unknowns: form.unknowns, confidence: form.confidence, abort_conditions: form.abort_conditions, first_action: form.first_action, committed_at: committedAt, commit_hash: commitHash }).select("*").single();
     if (decisionResult.error) throw decisionResult.error; decisionId = decisionResult.data.id;
@@ -165,12 +165,19 @@ async function handleReview(admin: any, session: any, payload: any) {
     const latencyMs = Date.now() - startedAt;
     const reviewResult = await admin.from("validation_reviews").insert({ validation_session_id: session.id, incident_id: incidentResult.data.id, decision_event_id: decisionId, provider, fallback, verdict: review.verdict, review, prior_decision_ids: (review.prior_decisions_used || []).map((item: any) => item.decision_event_id), latency_ms: latencyMs }).select("*").single();
     if (reviewResult.error) throw reviewResult.error;
+    // The run is retained from this point on: the durable review/checkpoint is persisted and retrievable.
+    const record = await getRecord(admin, session.id, decisionId);
+    checkpointCompleted = true;
     if (requestId) await admin.from("validation_ai_requests").update({ provider, status: fallback ? "fallback" : "completed", latency_ms: latencyMs, error_message: providerError ? providerError.slice(0, 1000) : null, updated_at: new Date().toISOString() }).eq("id", requestId);
     await admin.from("validation_events").insert({ validation_session_id: session.id, source_channel: sourceChannel, event_type: "decision_reviewed", metadata: { provider, fallback, verdict: review.verdict } });
     const refreshed = await admin.from("validation_sessions").select("*").eq("id", session.id).single();
-    return { record: await getRecord(admin, session.id, decisionId), session: safeSession(refreshed.data) };
+    return { record, session: safeSession(refreshed.data) };
   } catch (error) {
-    if (!decisionId) await admin.rpc("release_validation_run", { p_validation_session_id: session.id });
+    if (!checkpointCompleted) {
+      await admin.rpc("release_validation_run", { p_validation_session_id: session.id });
+      if (decisionId) await admin.from("validation_decisions").delete().eq("id", decisionId);
+      if (incidentId) await admin.from("validation_incidents").delete().eq("id", incidentId);
+    }
     if (requestId) await admin.from("validation_ai_requests").update({ status: "failed", latency_ms: Date.now() - startedAt, error_message: (error instanceof Error ? error.message : String(error)).slice(0, 1000), updated_at: new Date().toISOString() }).eq("id", requestId);
     throw error;
   }
@@ -179,7 +186,7 @@ async function handleReview(admin: any, session: any, payload: any) {
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders(req) });
   if (req.method !== "POST") return json(req, { ok: false, error: "POST required" }, 405);
-  const origin = normalizeOrigin(req.headers.get("origin") || ""); const allowed = allowedOrigins(); if (origin && !allowed.includes("*") && !allowed.includes(origin)) return json(req, { ok: false, error: "Origin not allowed" }, 403);
+  const origin = normalizeOrigin(req.headers.get("origin") || ""); const allowed = allowedOrigins(); if (!allowed.includes("*") && (!origin || !allowed.includes(origin))) return json(req, { ok: false, error: "Origin not allowed" }, 403);
   try {
     const length = Number(req.headers.get("content-length") || 0); if (length > MAX_BODY_BYTES) throw new ApiError("Request body too large", 413);
     const raw = await req.text(); if (raw.length > MAX_BODY_BYTES) throw new ApiError("Request body too large", 413);
@@ -197,7 +204,9 @@ serve(async (req) => {
       const decisionId = parseUuid(payload?.decision_event_id, "decision_event_id"); const reviewId = parseUuid(payload?.review_id, "review_id"); const actionValue = asString(payload?.action, 20); if (!["proceed", "revise", "escalate", "stop"].includes(actionValue)) throw new ApiError("Choose an explicit next move");
       const owned = await admin.from("validation_reviews").select("id").eq("id", reviewId).eq("decision_event_id", decisionId).eq("validation_session_id", session.id).maybeSingle(); if (!owned.data) throw new ApiError("Review record not found", 404);
       const row = { validation_session_id: session.id, decision_event_id: decisionId, decision_review_id: reviewId, action: actionValue, final_branch: asString(payload?.final_branch, 1200), reason: asString(payload?.reason, 1600), owner: asString(payload?.owner, 160) || null, due_at: asIsoDate(payload?.due_at) };
-      if (!row.final_branch || !row.reason) throw new ApiError("Next move and rationale are required"); const inserted = await admin.from("validation_actions").insert(row).select("*").single(); if (inserted.error) { const existing = await admin.from("validation_actions").select("*").eq("decision_event_id", decisionId).maybeSingle(); if (existing.data) return json(req, { ok: true, action: existing.data }); throw inserted.error; } return json(req, { ok: true, action: inserted.data });
+      if (!row.final_branch || !row.reason) throw new ApiError("Next move and rationale are required");
+      if ((actionValue === "revise" || actionValue === "escalate") && (!row.owner || !row.due_at)) throw new ApiError("Revise and escalate require an owner and a due date");
+      const inserted = await admin.from("validation_actions").insert(row).select("*").single(); if (inserted.error) { const existing = await admin.from("validation_actions").select("*").eq("decision_event_id", decisionId).maybeSingle(); if (existing.data) return json(req, { ok: true, action: existing.data }); throw inserted.error; } return json(req, { ok: true, action: inserted.data });
     }
     if (action === "save_outcome") {
       const decisionId = parseUuid(payload?.decision_event_id, "decision_event_id"); const actionId = parseUuid(payload?.action_id, "action_id"); const owned = await admin.from("validation_actions").select("id").eq("id", actionId).eq("decision_event_id", decisionId).eq("validation_session_id", session.id).maybeSingle(); if (!owned.data) throw new ApiError("Action record not found", 404);
@@ -210,6 +219,13 @@ serve(async (req) => {
       const novelty = asString(payload?.novelty, 30); const credibility = asString(payload?.alternative_credibility, 30); const feasibility = asString(payload?.check_feasibility, 30); const specificity = asString(payload?.specificity, 30);
       if (!["novel", "clarifying", "already_known", "irrelevant"].includes(novelty) || !["credible", "possible", "not_credible"].includes(credibility) || !["executable_now", "executable_later", "not_executable"].includes(feasibility) || !["case_specific", "partly_generic", "generic"].includes(specificity)) throw new ApiError("Complete all constrained feedback fields");
       const inserted = await admin.from("validation_feedback").insert({ validation_session_id: session.id, decision_event_id: decisionId, decision_review_id: reviewId, novelty, alternative_credibility: credibility, check_feasibility: feasibility, specificity, comment: asString(payload?.comment, 1000) || null }).select("*").single(); if (inserted.error) { const existing = await admin.from("validation_feedback").select("*").eq("decision_event_id", decisionId).maybeSingle(); if (existing.data) return json(req, { ok: true, feedback: existing.data }); throw inserted.error; } return json(req, { ok: true, feedback: inserted.data });
+    }
+    if (action === "save_signup_signal") {
+      const decisionId = parseUuid(payload?.decision_event_id, "decision_event_id"); const owned = await admin.from("validation_decisions").select("id").eq("id", decisionId).eq("validation_session_id", session.id).maybeSingle(); if (!owned.data) throw new ApiError("Decision record not found", 404);
+      const triggerContext = asString(payload?.trigger_context, 1200); const decisionDelta = asString(payload?.decision_delta, 1200); const commercialThreshold = asString(payload?.commercial_threshold, 1600);
+      if (!triggerContext || !decisionDelta || !commercialThreshold) throw new ApiError("All three evidence answers are required");
+      const row = { validation_session_id: session.id, decision_event_id: decisionId, source_channel: asString(payload?.source_channel, 100) || session.source_channel || "direct", trigger_context: triggerContext, decision_delta: decisionDelta, commercial_threshold: commercialThreshold };
+      const inserted = await admin.from("validation_signup_signals").insert(row).select("*").single(); if (inserted.error) { const existing = await admin.from("validation_signup_signals").select("*").eq("validation_session_id", session.id).maybeSingle(); if (existing.data) return json(req, { ok: true, signal: existing.data }); throw inserted.error; } return json(req, { ok: true, signal: inserted.data });
     }
     throw new ApiError("Unsupported action", 400);
   } catch (error) {

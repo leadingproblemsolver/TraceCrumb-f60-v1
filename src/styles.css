@@ -250,3 +250,6 @@ button:focus-visible, .button-link:focus-visible, input:focus-visible, textarea:
 /* Post-value conversion and validation surfaces */
 .conversion-card { border-color: color-mix(in srgb, var(--accent) 46%, var(--border)); background: linear-gradient(135deg, var(--surface), var(--accent-dim)); }
 .feedback-card { border-color: color-mix(in srgb, var(--warn) 38%, var(--border)); }
+
+.modal-backdrop { position: fixed; inset: 0; background: rgba(6,10,8,.6); display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 50; }
+.modal-card { width: min(560px, 100%); max-height: 88vh; overflow-y: auto; }

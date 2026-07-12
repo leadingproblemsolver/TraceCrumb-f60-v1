@@ -48,6 +48,7 @@ assert.match(readme, /no password, magic link, OAuth provider, or Supabase Auth 
 assert.match(readme, /10 server-enforced live review runs/i);
 assert.match(wedge, /Ten server-enforced live runs/i);
 assert.match(app, /Start your 10-run validation/i);
+assert.doesNotMatch(app, /demo runs\b/i);
 assert.match(app, /No password, identity provider, or Supabase Auth record is created/i);
 assert.doesNotMatch(app, /supabase\.auth|signInAnonymously|signInWithOtp|updateUser|signOut\(/);
 assert.doesNotMatch(client, /persistSession:\s*true|autoRefreshToken:\s*true|detectSessionInUrl:\s*true/);
@@ -80,8 +81,26 @@ assert.match(app, /Copy brief/);
 assert.match(app, /Download Markdown/);
 assert.match(app, /Download JSON/);
 
+// Ownership boundary: revise/escalate require an owner and due date, in the UI and the API.
+assert.match(app, /ownerRequired/);
+assert.match(edge, /actionValue === "revise" \|\| actionValue === "escalate"/);
+assert.match(edge, /Revise and escalate require an owner and a due date/);
+
+// First-run evidence signal: exactly the three approved questions, optional, saved once.
+assert.match(app, /FirstRunSignalModal/);
+assert.match(app, /FIRST_RUN_SIGNAL_KEY/);
+assert.match(app, /What happened today that made you try TraceCrumb now\?/);
+assert.match(app, /What changed or became sharper in your next move/);
+assert.match(app, /what result across your next 10 decisions would make TraceCrumb worth buying/);
+assert.match(app, /save_signup_signal/);
+assert.match(app, /first_run_signal_saved/);
+assert.match(app, /first_run_signal_skipped/);
+assert.doesNotMatch(app, /How satisfied are you|Would you pay for this|What feature do you want/i);
+assert.match(edge, /save_signup_signal/);
+assert.match(edge, /validation_signup_signals/);
+
 // Active auth-free data model and atomic quota.
-for (const table of ['validation_sessions', 'validation_incidents', 'validation_decisions', 'validation_reviews', 'validation_actions', 'validation_outcomes', 'validation_feedback', 'validation_ai_requests', 'validation_events']) {
+for (const table of ['validation_sessions', 'validation_incidents', 'validation_decisions', 'validation_reviews', 'validation_actions', 'validation_outcomes', 'validation_feedback', 'validation_ai_requests', 'validation_events', 'validation_signup_signals']) {
   assert.match(schema, new RegExp(`create table if not exists public\\.${table}`));
   assert.match(schema, new RegExp(`alter table public\\.${table} enable row level security`));
   assert.match(schema, new RegExp(`revoke all on public\\.${table} from public, anon, authenticated`));
@@ -95,6 +114,12 @@ assert.match(schema, /RUN_LIMIT_REACHED/);
 assert.match(schema, /release_validation_run/);
 assert.equal(schema, migration, 'Canonical schema and active migration must be byte-identical');
 assert.doesNotMatch(schema, /auth\.users|auth\.uid\(|org_members|profiles_select_own/);
+
+// Schema/migration must fail explicitly on partial incompatible state rather than silently no-op.
+assert.match(schema, /information_schema\.columns/);
+assert.match(schema, /TraceCrumb schema compatibility check failed/);
+assert.match(schema, /array\['validation_actions', 'owner'\]/);
+assert.match(schema, /array\['validation_actions', 'due_at'\]/);
 
 // Trusted function controls access and provider calls without Supabase Auth.
 assert.match(config, /verify_jwt\s*=\s*false/);
@@ -116,6 +141,18 @@ assert.match(edge, /No live telemetry was queried/);
 assert.match(edge, /not a root-cause finding/);
 assert.doesNotMatch(edge, /auth\.getUser|SUPABASE_ANON_KEY|org_members|auth\.users/);
 assert.doesNotMatch(app, /OPENAI_API_KEY|SUPABASE_SERVICE_ROLE_KEY|ABUSE_HASH_SECRET/);
+
+// Strict origin boundary: missing Origin and unauthorized Origin are both rejected unless ALLOWED_ORIGINS contains "*".
+assert.match(edge, /!allowed\.includes\("\*"\) && \(!origin \|\| !allowed\.includes\(origin\)\)/);
+assert.match(edge, /Origin not allowed/);
+
+// Atomic checkpoint/quota integrity: a run is retained only after a durable, retrievable checkpoint.
+assert.match(edge, /checkpointCompleted = false/);
+assert.match(edge, /checkpointCompleted = true/);
+assert.match(edge, /if \(!checkpointCompleted\)/);
+assert.match(edge, /release_validation_run/);
+assert.match(edge, /validation_decisions"\)\.delete\(\)/);
+assert.match(edge, /validation_incidents"\)\.delete\(\)/);
 
 // Deployment contract.
 assert.match(envExample, /VITE_SUPABASE_URL/);

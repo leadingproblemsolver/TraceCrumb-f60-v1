@@ -48,6 +48,16 @@ landing
 
 The fixed worked example remains available at `/?demo=1` and consumes no run.
 
+## Optional first-run evidence signal
+
+Immediately after a browser's **first** successfully persisted live checkpoint (not the worked example, and never after a failed submission), a one-time optional modal asks three evidence-dense questions: what triggered the check today, what changed or sharpened in the next move and why, and what the team spends today instead plus the pilot threshold that would justify buying TraceCrumb. It never asks for a satisfaction score or a hypothetical willingness-to-pay rating.
+
+- The modal is dismissible by Skip or by clicking the backdrop; either path reassures the user the checkpoint is already saved and never blocks the workflow.
+- Submitting requires all three answers; a partial answer set can only be skipped, not submitted.
+- Answers are written through the `save_signup_signal` Edge Function action into `public.validation_signup_signals`, bound to the current session and `decision_event_id`. The browser never writes this table directly.
+- A browser-local marker (`tracecrumb-first-run-signal-v1`) and the table's one-row-per-session unique constraint together guarantee the popup and the row are created at most once per browser/workspace.
+- `first_run_signal_saved` and `first_run_signal_skipped` are recorded through the existing `log_event` action for operator visibility.
+
 ## What changed in this finalization
 
 ### Technical
@@ -58,7 +68,9 @@ The fixed worked example remains available at `/?demo=1` and consumes no run.
 - Added atomic `reserve_validation_run()` enforcement.
 - Added one email hash + one browser-token hash per workspace to prevent trivial run resets with the same email.
 - Added a global daily provider budget.
-- Added explicit `verify_jwt = false` function configuration and strict allowed-origin checks.
+- Added explicit `verify_jwt = false` function configuration and strict allowed-origin checks: a missing Origin header and an Origin outside `ALLOWED_ORIGINS` are both rejected with 403 unless `ALLOWED_ORIGINS` explicitly contains `*`. Any future server-to-server (originless) integration must use a separate authenticated path rather than relying on this browser-facing, origin-checked function.
+- Made run consumption atomic: a run is retained only once the incident, decision, and review rows are all durably persisted and the checkpoint is retrievable. Any earlier failure releases the reserved run and deletes the incomplete incident/decision rows, so history never shows a partial checkpoint and a failed submission never costs a run.
+- Made the active schema/migration fail explicitly, before any index/function/grant is created, if pre-existing `validation_*` tables are missing a required column — rather than silently leaving a partially initialized table in place.
 - Added consequence type, decision deadline, known unknowns, action owner/due date, structured review feedback, and `tracecrumb_effect`.
 - Kept deterministic fallback, immutable commit hash, history, export, copy, source attribution, and outcome capture.
 
@@ -168,17 +180,20 @@ npm run deploy:cloudflare
 ## 7. Non-negotiable production smoke test
 
 1. Open `/?source_channel=smoke_test` in a private browser.
-2. Open the worked example; confirm no run is consumed.
-3. Start a workspace with a real test email.
+2. Open the worked example; confirm no run is consumed and the optional evidence modal does not appear.
+3. Start a workspace with a real test email; confirm the signup CTA reads "Start your 10-run validation."
 4. Confirm the header shows `10/10 runs left`.
 5. Submit one redacted real incident decision.
 6. Confirm the header changes to `9/10 runs left`.
 7. Confirm four checkpoint cards render.
 8. Confirm no next move is preselected.
-9. Save an action, feedback, and outcome.
-10. Refresh and confirm history reopens the record on the same browser.
-11. Confirm direct browser table access is denied and the function is the only write boundary.
-12. Confirm rows exist in all relevant `validation_*` tables.
+9. Confirm the optional three-question evidence modal appears once; verify both the Skip path and the submit path work, and that it does not reappear after a page refresh.
+10. Attempt `revise` or `escalate` without an owner/due date and confirm it is rejected in the UI and by the API; then submit with owner and due date and confirm it succeeds.
+11. Save feedback and an outcome.
+12. Refresh and confirm history reopens the record on the same browser.
+13. Confirm direct browser table access is denied and the function is the only write boundary.
+14. Confirm a request with a wrong Origin and a request with no Origin header both receive 403.
+15. Confirm rows exist in all relevant `validation_*` tables, including exactly one `validation_signup_signals` row for the session.
 
 ## 8. Distribution gate
 

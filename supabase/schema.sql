@@ -128,6 +128,58 @@ create table if not exists public.validation_events (
   created_at timestamptz not null default now()
 );
 
+create table if not exists public.validation_signup_signals (
+  id uuid primary key default gen_random_uuid(),
+  validation_session_id uuid not null unique references public.validation_sessions(id) on delete cascade,
+  decision_event_id uuid not null references public.validation_decisions(id) on delete cascade,
+  source_channel text not null default 'direct',
+  trigger_context text not null,
+  decision_delta text not null,
+  commercial_threshold text not null,
+  created_at timestamptz not null default now()
+);
+
+-- Compatibility guard: CREATE TABLE IF NOT EXISTS cannot upgrade a pre-existing,
+-- partially initialized validation_* table. Fail explicitly before any dependent
+-- index, function, or grant is created rather than silently operating on a
+-- schema that does not match this contract.
+do $$
+declare
+  required text[][] := array[
+    array['validation_sessions', 'access_token_hash'],
+    array['validation_sessions', 'email_hash'],
+    array['validation_sessions', 'run_count'],
+    array['validation_sessions', 'max_runs'],
+    array['validation_sessions', 'status'],
+    array['validation_incidents', 'consequence_type'],
+    array['validation_incidents', 'decision_deadline'],
+    array['validation_decisions', 'unknowns'],
+    array['validation_actions', 'owner'],
+    array['validation_actions', 'due_at'],
+    array['validation_outcomes', 'tracecrumb_effect'],
+    array['validation_feedback', 'novelty'],
+    array['validation_feedback', 'alternative_credibility'],
+    array['validation_feedback', 'check_feasibility'],
+    array['validation_feedback', 'specificity'],
+    array['validation_ai_requests', 'status']
+  ];
+  pair text[];
+  missing text[] := array[]::text[];
+begin
+  foreach pair slice 1 in array required loop
+    if not exists (
+      select 1 from information_schema.columns
+      where table_schema = 'public' and table_name = pair[1] and column_name = pair[2]
+    ) then
+      missing := array_append(missing, pair[1] || '.' || pair[2]);
+    end if;
+  end loop;
+
+  if array_length(missing, 1) > 0 then
+    raise exception 'TraceCrumb schema compatibility check failed: existing validation_* tables are missing required columns: %. Resolve the partial schema before rerunning this migration.', array_to_string(missing, ', ');
+  end if;
+end $$;
+
 create index if not exists idx_validation_decisions_session_committed on public.validation_decisions(validation_session_id, committed_at desc);
 create index if not exists idx_validation_requests_session_created on public.validation_ai_requests(validation_session_id, created_at desc);
 create index if not exists idx_validation_requests_created on public.validation_ai_requests(created_at desc);
@@ -177,6 +229,7 @@ alter table public.validation_outcomes enable row level security;
 alter table public.validation_feedback enable row level security;
 alter table public.validation_ai_requests enable row level security;
 alter table public.validation_events enable row level security;
+alter table public.validation_signup_signals enable row level security;
 
 revoke all on public.validation_sessions from public, anon, authenticated;
 revoke all on public.validation_incidents from public, anon, authenticated;
@@ -187,6 +240,7 @@ revoke all on public.validation_outcomes from public, anon, authenticated;
 revoke all on public.validation_feedback from public, anon, authenticated;
 revoke all on public.validation_ai_requests from public, anon, authenticated;
 revoke all on public.validation_events from public, anon, authenticated;
+revoke all on public.validation_signup_signals from public, anon, authenticated;
 revoke all on function public.reserve_validation_run(uuid) from public, anon, authenticated;
 revoke all on function public.release_validation_run(uuid) from public, anon, authenticated;
 grant execute on function public.reserve_validation_run(uuid) to service_role;
