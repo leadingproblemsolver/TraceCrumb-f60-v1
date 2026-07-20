@@ -1,0 +1,26 @@
+{
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node ./scripts/static-ship-tests.mjs",
+    "scan:secrets": "gitleaks detect --no-banner --redact --source . --config .gitleaks.toml",
+    "ship:test": "npm run test && npm run build",
+    "prepare": "husky"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "latest",
+    "@vitejs/plugin-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "vite": "latest"
+  },
+  "devDependencies": {
+    "gitleaks": "^1.0.0",
+    "husky": "^9.1.7"
+  },
+  "name": "tracecrumb-first60",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module"
+}
